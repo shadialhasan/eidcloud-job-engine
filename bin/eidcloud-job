@@ -1,0 +1,348 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Register autoloader
+spl_autoload_register(function (string $class) {
+    $prefix = 'EidCloud\\JobEngine\\';
+    $baseDir = __DIR__ . '/../src/';
+
+    $len = strlen($prefix);
+    if (strncmp($prefix, $class, $len) !== 0) {
+        return;
+    }
+
+    $relativeClass = substr($class, $len);
+    $file = $baseDir . str_replace('\\', '/', $relativeClass) . '.php';
+
+    if (file_exists($file)) {
+        require_once $file;
+    }
+});
+
+use EidCloud\JobEngine\JobQueue;
+use EidCloud\JobEngine\Worker\Worker;
+use EidCloud\JobEngine\Worker\WorkerOptions;
+use EidCloud\JobEngine\Worker\ProcessPool;
+use EidCloud\JobEngine\Models\JobPayload;
+
+function parseArgs(array $argv): array
+{
+    $args = ['command' => null, 'options' => []];
+    $count = count($argv);
+    if ($count < 2) {
+        return $args;
+    }
+
+    $i = 1;
+    if (!str_starts_with($argv[1], '-')) {
+        $args['command'] = $argv[1];
+        $i = 2;
+    }
+
+    for (; $i < $count; $i++) {
+        $arg = $argv[$i];
+        if (str_starts_with($arg, '--')) {
+            $parts = explode('=', substr($arg, 2), 2);
+            $key = $parts[0];
+            $value = $parts[1] ?? true;
+            $args['options'][$key] = $value;
+        } elseif (str_starts_with($arg, '-')) {
+            $key = substr($arg, 1);
+            $args['options'][$key] = true;
+        }
+    }
+
+    return $args;
+}
+
+function showHelp(): void
+{
+    $banner = <<<TXT
+\033[1;36m====================================================================\033[0m
+\033[1;32m       ⚙️  EidCloud Job Engine - High Throughput Worker CLI\033[0m
+\033[1;36m====================================================================\033[0m
+\033[1;33mUsage:\033[0m
+  php bin/eidcloud-job <command> [options]
+
+\033[1;33mCommands:\033[0m
+  \033[1;32mwork\033[0m        Start background worker process(es)
+  \033[1;32mdispatch\033[0m    Push a new job to the queue
+  \033[1;32mdashboard\033[0m   Launch live terminal dashboard monitoring queue & workers
+  \033[1;32mdlq\033[0m         Inspect, replay, or purge dead-lettered jobs
+  \033[1;32mstats\033[0m       Show current queue statistics snapshot
+
+\033[1;33mOptions for 'work':\033[0m
+  --workers=N          Number of parallel worker processes (default: 4)
+  --queue=name1,name2  Comma-separated list of queues to listen on (default: default)
+  --driver=type        Queue driver: sqlite, file, redis (default: sqlite)
+  --db-path=path       Path to SQLite db or file queue directory
+  --stop-when-empty    Worker exits when queues become empty
+  --max-jobs=N         Worker stops after processing N jobs
+  --single-worker      Run single worker loop directly
+
+\033[1;33mOptions for 'dispatch':\033[0m
+  --job=Class          Job class name (e.g. "App\\Jobs\\VideoProcess")
+  --payload='{"id":1}' JSON payload data for the job
+  --queue=name         Target queue (default: default)
+  --priority=N         Priority level (10 = low, 50 = default, 100 = high)
+  --delay=N            Delay in seconds before job becomes available
+  --retries=N          Max retry attempts before moving to DLQ (default: 3)
+
+\033[1;33mOptions for 'dlq':\033[0m
+  --replay=id          Replay a specific dead-letter job ID back to queue
+  --purge              Purge all dead-letter jobs
+  --limit=N            Number of records to show (default: 20)
+
+\033[1;33mGlobal Options:\033[0m
+  -h, --help           Show this formatted help message
+
+\033[1;36mExamples:\033[0m
+  php bin/eidcloud-job work --workers=4 --queue=media,default
+  php bin/eidcloud-job dispatch --job="App\Jobs\VideoProcess" --payload='{"id":123}'
+  php bin/eidcloud-job dashboard
+\033[1;36m====================================================================\033[0m
+
+TXT;
+    echo $banner;
+}
+
+$parsed = parseArgs($argv);
+$command = $parsed['command'];
+$options = $parsed['options'];
+
+if ($command === null || isset($options['h']) || isset($options['help'])) {
+    showHelp();
+    exit(0);
+}
+
+// Driver configuration
+$driverType = $options['driver'] ?? 'sqlite';
+$driverConfig = [];
+if ($driverType === 'sqlite') {
+    $defaultPath = getcwd() . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'queue.sqlite';
+    $driverConfig['path'] = $options['db-path'] ?? $defaultPath;
+} elseif ($driverType === 'file') {
+    $defaultPath = getcwd() . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'queue_store';
+    $driverConfig['path'] = $options['db-path'] ?? $defaultPath;
+} elseif ($driverType === 'redis') {
+    $driverConfig['host'] = $options['redis-host'] ?? '127.0.0.1';
+    $driverConfig['port'] = (int)($options['redis-port'] ?? 6379);
+}
+
+$engine = new JobQueue($driverType, $driverConfig);
+
+switch ($command) {
+    case 'dispatch':
+        $jobClass = $options['job'] ?? null;
+        if (!$jobClass) {
+            echo "\033[1;31mError: --job parameter is required.\033[0m\n";
+            exit(1);
+        }
+
+        $payloadStr = $options['payload'] ?? '{}';
+        $payloadData = json_decode($payloadStr, true) ?? [];
+
+        $queue = $options['queue'] ?? 'default';
+        $priority = (int)($options['priority'] ?? JobPayload::PRIORITY_DEFAULT);
+        $delay = (int)($options['delay'] ?? 0);
+        $retries = (int)($options['retries'] ?? 3);
+
+        $jobId = $engine->dispatch(
+            jobClass: $jobClass,
+            data: $payloadData,
+            queue: $queue,
+            priority: $priority,
+            delaySeconds: $delay,
+            maxAttempts: $retries
+        );
+
+        echo "\033[1;32m✔ Job dispatched successfully!\033[0m\n";
+        echo "  \033[1;34mJob ID:\033[0m   {$jobId}\n";
+        echo "  \033[1;34mClass:\033[0m    {$jobClass}\n";
+        echo "  \033[1;34mQueue:\033[0m    {$queue}\n";
+        echo "  \033[1;34mPriority:\033[0m {$priority}\n";
+        if ($delay > 0) {
+            echo "  \033[1;34mDelay:\033[0m    {$delay}s\n";
+        }
+        break;
+
+    case 'work':
+        $queues = explode(',', (string)($options['queue'] ?? 'default'));
+        $workers = (int)($options['workers'] ?? 4);
+
+        $wOptions = new WorkerOptions(
+            maxJobs: (int)($options['max-jobs'] ?? 0),
+            stopWhenEmpty: isset($options['stop-when-empty'])
+        );
+
+        if (isset($options['single-worker'])) {
+            $workerId = $options['worker-id'] ?? null;
+            $heartbeatFile = $options['heartbeat-file'] ?? null;
+            $worker = new Worker($engine->getDriver(), $queues, $wOptions, $workerId, $heartbeatFile);
+            $worker->work();
+            exit(0);
+        }
+
+        echo "\033[1;32m⚙️  Starting EidCloud Worker Pool...\033[0m\n";
+        echo "  Workers: \033[1;36m{$workers}\033[0m\n";
+        echo "  Queues:  \033[1;36m" . implode(', ', $queues) . "\033[0m\n";
+        echo "  Driver:  \033[1;36m{$driverType}\033[0m\n";
+        echo "Press CTRL+C for graceful shutdown.\n\n";
+
+        $pool = $engine->pool($queues, $workers, $wOptions);
+        $pool->start();
+        break;
+
+    case 'dashboard':
+        runDashboard($engine);
+        break;
+
+    case 'stats':
+        $stats = $engine->stats();
+        echo "\033[1;36m=== EidCloud Job Engine Stats ===\033[0m\n";
+        foreach ($stats as $k => $v) {
+            printf("  %-15s : %d\n", ucfirst(str_replace('_', ' ', $k)), $v);
+        }
+        break;
+
+    case 'dlq':
+        if (isset($options['purge'])) {
+            $purged = $engine->purgeDlq();
+            echo "\033[1;32mPurged {$purged} dead-letter jobs.\033[0m\n";
+            exit(0);
+        }
+
+        if (isset($options['replay'])) {
+            $jobId = (string)$options['replay'];
+            $ok = $engine->replay($jobId);
+            if ($ok) {
+                echo "\033[1;32mReplayed job '{$jobId}' back to queue.\033[0m\n";
+            } else {
+                echo "\033[1;31mJob ID '{$jobId}' not found in DLQ.\033[0m\n";
+            }
+            exit(0);
+        }
+
+        $limit = (int)($options['limit'] ?? 20);
+        $dlq = $engine->dlq($limit);
+        echo "\033[1;31m=== Dead Letter Queue (" . count($dlq) . " records) ===\033[0m\n\n";
+        if (empty($dlq)) {
+            echo "No dead letters recorded.\n";
+            exit(0);
+        }
+
+        foreach ($dlq as $item) {
+            $date = date('Y-m-d H:i:s', (int)($item['failed_at'] ?? 0));
+            echo "--------------------------------------------------------\n";
+            echo "\033[1;33mID:\033[0m       {$item['id']}\n";
+            echo "\033[1;33mClass:\033[0m    {$item['job_class']}\n";
+            echo "\033[1;33mQueue:\033[0m    {$item['queue']}\n";
+            echo "\033[1;33mFailed:\033[0m   {$date}\n";
+            echo "\033[1;33mAttempts:\033[0m {$item['attempts']}\n";
+            echo "\033[1;31mError:\033[0m    {$item['error_message']}\n";
+        }
+        break;
+
+    default:
+        echo "\033[1;31mUnknown command '{$command}'. Run with --help for instructions.\033[0m\n";
+        exit(1);
+}
+
+function runDashboard(JobQueue $engine): void
+{
+    // Clear screen
+    echo "\033[2J\033[H";
+    $heartbeatDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'eidcloud_job_workers';
+
+    $prevCompleted = null;
+    $prevTime = microtime(true);
+    $throughput = 0.0;
+
+    echo "\033[?25l"; // Hide cursor
+    register_shutdown_function(fn() => print("\033[?25h"));
+
+    while (true) {
+        $stats = $engine->stats();
+        $currTime = microtime(true);
+
+        if ($prevCompleted !== null) {
+            $diffJobs = max(0, $stats['completed'] - $prevCompleted);
+            $diffTime = max(0.001, $currTime - $prevTime);
+            $throughput = $diffJobs / $diffTime;
+        }
+        $prevCompleted = $stats['completed'];
+        $prevTime = $currTime;
+
+        // Collect heartbeats
+        $files = @scandir($heartbeatDir) ?: [];
+        $workers = [];
+        $now = time();
+        foreach ($files as $file) {
+            if (str_ends_with($file, '.json')) {
+                $content = @file_get_contents($heartbeatDir . DIRECTORY_SEPARATOR . $file);
+                if ($content) {
+                    $w = @json_decode($content, true);
+                    if ($w) {
+                        $w['healthy'] = ($now - ($w['time'] ?? 0)) <= 15;
+                        $workers[] = $w;
+                    }
+                }
+            }
+        }
+
+        // Render dashboard view
+        echo "\033[H";
+        $header = <<<DASH
+\033[1;44;37m                       ⚙️  EIDCLOUD REAL-TIME JOB DASHBOARD                       \033[0m
+\033[1;30m System Time: \033[0m\033[1;37m%s\033[0m  |  \033[1;30mThroughput:\033[0m \033[1;32m%.2f jobs/sec\033[0m  |  \033[1;30mTotal Jobs:\033[0m \033[1;33m%d\033[0m
+\033[1;34m--------------------------------------------------------------------------------\033[0m
+\033[1;33m[QUEUE METRICS]\033[0m
+  ▶ \033[1;32mPending:\033[0m     %-8d  ▶ \033[1;36mProcessing:\033[0m   %-8d
+  ▶ \033[1;34mDelayed:\033[0m     %-8d  ▶ \033[1;31mDead Letters:\033[0m %-8d
+  ▶ \033[1;32mCompleted:\033[0m   %-8d
+
+\033[1;34m--------------------------------------------------------------------------------\033[0m
+\033[1;33m[ACTIVE WORKER POOL (%d Active)]\033[0m
+  %-24s %-8s %-12s %-10s %-10s
+DASH;
+
+        printf(
+            $header . "\n",
+            date('H:i:s'),
+            $throughput,
+            $stats['total'],
+            $stats['pending'],
+            $stats['processing'],
+            $stats['delayed'],
+            $stats['dead_letters'],
+            $stats['completed'],
+            count($workers),
+            "WORKER ID", "PID", "STATUS", "PROCESSED", "FAILED"
+        );
+
+        echo "  " . str_repeat('-', 74) . "\n";
+
+        if (empty($workers)) {
+            echo "  \033[1;30mNo active background workers currently connected.\033[0m\n";
+        } else {
+            foreach ($workers as $w) {
+                $statusColor = $w['healthy'] ? "\033[1;32mALIVE\033[0m" : "\033[1;31mDEAD\033[0m";
+                printf(
+                    "  %-24s %-8s %-20s %-10d %-10d\n",
+                    substr($w['id'] ?? 'unknown', 0, 24),
+                    $w['pid'] ?? '-',
+                    $statusColor,
+                    $w['processed'] ?? 0,
+                    $w['failed'] ?? 0
+                );
+            }
+        }
+
+        echo "\n\033[1;34m--------------------------------------------------------------------------------\033[0m\n";
+        echo "\033[1;30mPress CTRL+C to exit dashboard.\033[0m\n";
+
+        sleep(1);
+    }
+}

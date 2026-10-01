@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php-version: ['8.2', '8.3']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          coverage: none
+
+      - name: Validate PHP syntax
+        run: find src bin tests -type f -name "*.php" -exec php -l {} \;
+
+      - name: Run Test Suite
+        run: php tests/run_tests.php
+
+      - name: Verify CLI help
+        run: |
+          chmod +x bin/eidcloud-job 2>/dev/null || true
+          php bin/eidcloud-job --help

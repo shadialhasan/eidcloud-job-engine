@@ -1,0 +1,15 @@
+vendor/
+composer.lock
+.phpunit.cache
+*.log
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+storage/
+tmp/
+coverage/

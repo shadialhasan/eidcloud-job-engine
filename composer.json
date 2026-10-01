@@ -1,0 +1,24 @@
+{
+  "name": "eidcloud/eidcloud-job-engine",
+  "description": "High-throughput asynchronous job queue and multi-process worker engine with retries and DLQ in pure PHP",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "MHD. Shadi AL-Hasan",
+      "role": "Author & Maintainer"
+    }
+  ],
+  "require": {
+    "php": ">=8.2.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "EidCloud\\JobEngine\\": "src/"
+    }
+  },
+  "bin": [
+    "bin/eidcloud-job"
+  ],
+  "minimum-stability": "stable"
+}

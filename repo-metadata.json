@@ -1,0 +1,12 @@
+{
+  "description": "High-throughput asynchronous job queue and multi-process worker engine with retries and DLQ in pure PHP",
+  "topics": [
+    "eidcloud",
+    "job-queue",
+    "worker-engine",
+    "background-jobs",
+    "task-scheduler",
+    "dead-letter-queue",
+    "php8"
+  ]
+}
