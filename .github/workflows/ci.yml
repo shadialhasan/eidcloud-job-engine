@@ -14,7 +14,7 @@ jobs:
         php-version: ['8.2', '8.3']
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup PHP
@@ -26,10 +26,10 @@ jobs:
       - name: Validate PHP syntax
         run: find src bin tests -type f -name "*.php" -exec php -l {} \;
 
-      - name: Run Test Suite
+      - name: Run tests
         run: php tests/run_tests.php
 
-      - name: Verify CLI help
+      - name: CLI help
         run: |
           chmod +x bin/eidcloud-job 2>/dev/null || true
           php bin/eidcloud-job --help
